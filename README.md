@@ -50,15 +50,15 @@ Do not run as Administrator merely to remove a harmless warning.
 ## Setup (PowerShell)
 
 ```powershell
-py -3.12 -m venv .venv
+py -3.14 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 ```
 
 If `py` is unavailable, install Python 3.12+ from python.org and enable the
-Python launcher during setup. The current repository was bootstrapped with
-Python 3.12.14.
+Python launcher during setup. The current repository was validated with the
+official Python 3.14.7 distribution.
 
 ## Usage
 
