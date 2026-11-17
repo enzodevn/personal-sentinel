@@ -11,8 +11,12 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
+import sqlite3
 import sys
-from collections.abc import Sequence
+import time
+from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 from sentinel import __version__
@@ -21,6 +25,8 @@ from sentinel.collectors.processes import ProcessCollector
 from sentinel.collectors.system import SystemCollector
 from sentinel.logging_config import configure_logging
 from sentinel.models import CollectionError, NetworkConnection, ProcessInfo
+from sentinel.monitoring import SentinelMonitor
+from sentinel.storage import EventStore
 
 
 LOGGER = logging.getLogger("sentinel.cli")
@@ -54,12 +60,62 @@ def build_parser() -> argparse.ArgumentParser:
         type=positive_integer,
         help="show at most this many rows",
     )
+    monitor = subparsers.add_parser(
+        "monitor",
+        help="continuously collect local telemetry into SQLite",
+    )
+    monitor.add_argument(
+        "--database",
+        type=Path,
+        default=Path("data") / "sentinel.db",
+        help="local SQLite database path (default: data/sentinel.db)",
+    )
+    monitor.add_argument(
+        "--interval",
+        type=positive_float,
+        default=5.0,
+        help="seconds between collection cycles (default: 5)",
+    )
+    monitor.add_argument(
+        "--retention-days",
+        type=positive_integer,
+        default=30,
+        help="delete events older than this many days (default: 30)",
+    )
+    monitor.add_argument(
+        "--once",
+        action="store_true",
+        help="run one collection cycle and exit",
+    )
+    events = subparsers.add_parser("events", help="show recent locally stored events")
+    events.add_argument(
+        "--database",
+        type=Path,
+        default=Path("data") / "sentinel.db",
+        help="local SQLite database path (default: data/sentinel.db)",
+    )
+    events.add_argument(
+        "--limit",
+        type=positive_integer,
+        default=20,
+        help="maximum number of events to show (default: 20)",
+    )
     return parser
 
 
 def positive_integer(value: str) -> int:
     number = int(value)
     if number <= 0:
+        raise argparse.ArgumentTypeError("must be greater than zero")
+    return number
+
+
+def positive_float(value: str) -> float:
+    try:
+        number = float(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be a number greater than zero") from error
+    if not math.isfinite(number) or number <= 0:
         raise argparse.ArgumentTypeError("must be greater than zero")
     return number
 
@@ -72,6 +128,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         "status": show_status,
         "processes": lambda: show_processes(args.limit),
         "network": lambda: show_network(args.limit),
+        "monitor": lambda: show_monitor(
+            args.database,
+            interval=args.interval,
+            retention_days=args.retention_days,
+            once=args.once,
+        ),
+        "events": lambda: show_events(args.database, args.limit),
     }
     return handlers[args.command]()
 
@@ -162,6 +225,69 @@ def show_network(limit: int | None = None) -> int:
     return 1 if result.errors and not result.data else 0
 
 
+def show_monitor(
+    database: Path,
+    *,
+    interval: float = 5.0,
+    retention_days: int = 30,
+    once: bool = False,
+) -> int:
+    try:
+        store = EventStore(database, retention_days=retention_days)
+        monitor = SentinelMonitor(store)
+        print(f"Monitoring local telemetry into {database} (Ctrl+C to stop).")
+        reported_sources: set[str] = set()
+        while True:
+            cycle = monitor.collect_once()
+            print(
+                f"Cycle: {cycle.stored_events} new event(s), "
+                f"{cycle.pruned_events} expired event(s) removed."
+            )
+            new_errors = [
+                error for error in cycle.errors if error.scope not in reported_sources
+            ]
+            _report_errors(new_errors)
+            reported_sources.update(error.scope for error in new_errors)
+            if once:
+                break
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        print("\nMonitoring stopped.")
+    except (OSError, sqlite3.Error, RuntimeError) as error:
+        LOGGER.exception("monitoring failed")
+        print(f"Monitoring failed: {type(error).__name__}: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def show_events(database: Path, limit: int = 20) -> int:
+    try:
+        events = EventStore(database).recent_events(limit)
+    except (OSError, sqlite3.Error, RuntimeError) as error:
+        LOGGER.exception("event history could not be read")
+        print(f"Could not read event history: {type(error).__name__}: {error}", file=sys.stderr)
+        return 1
+    print("SENTINEL EVENTS")
+    print(f"Displayed: {len(events)}")
+    print()
+    rows = [
+        (
+            event.timestamp.isoformat(timespec="seconds"),
+            event.event_type,
+            _value(event.process_id),
+            _clip(str(event.details.get("name") or event.details.get("image") or ""), 32),
+            _clip(_event_detail(event.details), 64),
+            event.source,
+        )
+        for event in events
+    ]
+    _print_table(
+        ("TIME (UTC)", "EVENT", "PID", "PROCESS", "DETAILS", "SOURCE"),
+        rows,
+    )
+    return 0
+
+
 def _report_errors(errors: Sequence[CollectionError]) -> None:
     if not errors:
         return
@@ -227,6 +353,25 @@ def _clip(value: str | None, width: int) -> str:
         return "-"
     safe = " ".join(value.splitlines())
     return safe if len(safe) <= width else f"{safe[: width - 3]}..."
+
+
+def _event_detail(details: Mapping[str, object]) -> str:
+    registry_path = details.get("registry_path")
+    if registry_path:
+        return str(registry_path)
+    destination_ip = details.get("destination_ip")
+    if destination_ip:
+        destination_port = details.get("destination_port")
+        endpoint = str(destination_ip)
+        if destination_port is not None:
+            endpoint = f"{endpoint}:{destination_port}"
+        protocol = details.get("protocol")
+        return f"{protocol} {endpoint}" if protocol else endpoint
+    for key in ("path", "parent_image", "provider"):
+        value = details.get(key)
+        if value:
+            return str(value)
+    return "-"
 
 
 if __name__ == "__main__":

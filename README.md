@@ -1,29 +1,33 @@
-# Sentinel
+# Personal Sentinel
 
-Sentinel V0.1 is a local, read-only Windows system observer built as the first
-layer of a personal defensive cybersecurity platform. It collects real system,
-process, and network telemetry. It does **not** label activity as malicious,
-block connections, terminate processes, or send data outside the computer.
+Personal Sentinel V0.2 builds on the read-only V0.1 collectors with opt-in,
+continuous process and Windows Event Log monitoring. Selected events are
+normalized and stored in a local SQLite database. It does **not** label activity
+as malicious, block connections, terminate processes, or send data outside the
+computer.
 
-## Why V0.1 exists
+## Why V0.2 exists
 
-Security detection is only as trustworthy as its telemetry. This version keeps
-the problem small enough to understand: collect operating-system facts, preserve
-partial results when permissions or short-lived processes cause errors, and show
-the result through a testable CLI.
+Security detection is only as trustworthy as its telemetry. V0.2 adds a small,
+auditable event pipeline: take read-only snapshots, ingest selected Windows
+events when available, normalize them, and retain a bounded local history.
 
 ```text
 Windows host
     |
-    +-- SystemCollector  ----+
-    +-- ProcessCollector ----+--> typed CollectionResult --> CLI
-    +-- NetworkCollector ----+             |
-                                             +--> safe JSON application logs
+    +-- SystemCollector  -----+
+    +-- ProcessCollector -----+--> typed results --> CLI
+    +-- NetworkCollector -----+          |
+                                         +--> ProcessDeltaMonitor
+                                         +--> WindowsEventLogCollector
+                                                  |
+                                                  v
+                                           local SQLite EventStore
 ```
 
 The collectors do not call one another. Models do not know about presentation.
-The CLI composes those pieces. This is enough separation to support later event
-normalization without inventing a message bus, database, API, or service layer.
+The CLI composes the collectors and monitor. There is no service installation,
+message broker, network API, or dashboard.
 
 ## Feature decisions
 
@@ -35,7 +39,9 @@ normalization without inventing a message bus, database, API, or service layer.
 | Network collector | no process-to-socket view | TCP/UDP, local/remote endpoint, state, ports | raw context for later network detections | networking, SOC, cloud security | Yes | local connection and permission-failure tests |
 | CLI | telemetry needs a usable interface | argument parsing, formatting, exit codes | manual inspection without a web attack surface | backend and operations tooling | Yes | CLI output tests and manual runs |
 | Structured logging | silent failures make results misleading | levels, JSON, rotation, privacy | records application health without command lines or secrets | SRE, DevSecOps, incident diagnosis | Yes | tests exercise log creation; manual inspection |
-| Database/API/dashboard/detection | no V0.1 problem requires them | later milestones | would add complexity before stable telemetry | valuable later | No | deferred until acceptance criteria exist |
+| Event model and SQLite store | telemetry needs a local history | event schemas, SQL, retention | bounded local records with deduplication | data engineering, endpoint telemetry | Yes (V0.2) | round-trip, duplicate, retention tests |
+| Process delta monitoring | snapshots alone lose lifecycle changes | baselines, PID reuse, polling | records observed starts/exits without claiming malice | EDR and SOC engineering | Yes (V0.2) | synthetic process snapshots |
+| Windows Event Log | selected OS events need history | channels, event IDs, checkpoints | reads selected System, Security, and optional Sysmon process, network, startup-key, and service-key events | Windows security engineering | Yes (V0.2) | XML parsing and checkpoint tests |
 
 ## Prerequisites
 
@@ -68,7 +74,16 @@ sentinel processes
 sentinel processes --limit 20
 sentinel network
 sentinel network --limit 30
+sentinel monitor --once
+sentinel monitor --interval 5
+sentinel events --limit 20
 ```
+
+`monitor` runs in the foreground until Ctrl+C. `--once` performs one collection
+cycle and exits; the first cycle establishes a process baseline and skips older
+Windows Event Log records. The default database is `data/sentinel.db`. Configure
+retention with `--retention-days`; the store also limits history to 100,000
+events. Use `--database` on both commands to choose another local path.
 
 Application-health logs are written as JSON lines to `logs/sentinel.log` in the
 current directory. Set `SENTINEL_LOG_DIR` to choose a different local directory.
@@ -111,20 +126,62 @@ single unusual process or port is evidence to investigate—not a malware verdic
 
 ## Security and privacy boundaries
 
-- Collection is read-only and local.
+- Collection is read-only and local; monitoring is opt-in and runs in the foreground.
 - There is no persistence, service installation, packet capture, DNS interception,
   external lookup, blocking, quarantine, or automated response.
 - Normal logs contain application health only, not process arguments or network rows.
+- The event store excludes process command lines, event-log user fields, and
+  Registry value contents. It is an ordinary, unencrypted SQLite database;
+  protect the chosen folder accordingly.
+- Windows Event Log cursors start at the newest record on first use, so old records
+  are not imported. Missing channels or permissions are reported as collection
+  warnings; Sysmon is optional and is never installed or configured by Sentinel.
+- Only selected System events (6005, 6006, 6008), Security events (4688, 4689),
+  and Sysmon events (1, 3, 12, 13, 14) are ingested. Security process events
+  require the corresponding Windows audit policy and may require additional
+  permissions; Sentinel never changes audit settings. Events 6005/6006 describe
+  the Event Log service lifecycle, not definitive host startup/shutdown. Registry
+  events are restricted to selected startup and service keys, and value contents
+  are not stored. This is not full event-log archiving.
 - `.env`, virtual environments, caches, and runtime logs are ignored by Git.
 - The tool should run with ordinary user privileges by default.
 
 ## Current limitations
 
-- This is snapshot-based manual observation, not continuous monitoring.
+- System and manual network commands remain snapshots; continuous monitoring
+  currently records process lifecycle deltas and selected Windows events.
 - Network results are socket metadata, not packet contents or DNS history.
 - Process CPU is a brief sample and not a long-term utilization measure.
 - Processes can exit between enumeration and inspection.
-- V0.1 has no baseline, event model, persistence, rules, risk score, or alerts.
+- Process lifecycle events require a readable process and creation time; the
+  first process scan is a baseline and does not generate start events.
+- Windows Event Log polling is bounded to 100 records per channel per cycle.
+- V0.2 still has no detection rules, risk score, or security alerts.
+
+## V0.2 status
+
+Implemented in this milestone: typed normalized events, local SQLite storage,
+retention and deduplication, process lifecycle polling, and bounded ingestion of
+selected System and optional Sysmon Event Log records, including selected
+Security process events and startup/service registry paths. This does not yet
+complete the full V0.2 roadmap; broader event normalization and validation across
+more Windows/Sysmon configurations remain.
+
+To try the foreground monitor on Windows:
+
+```powershell
+sentinel monitor --interval 5
+```
+
+In another terminal, inspect its local history:
+
+```powershell
+sentinel events --limit 20
+```
+
+The first cycle is a baseline; start/exit events appear only after a later
+snapshot observes a change. If the optional Sysmon channel is missing or
+inaccessible, Sentinel reports a warning and continues with available sources.
 
 ## Definition of done for V0.1
 
@@ -134,8 +191,8 @@ single unusual process or port is evidence to investigate—not a malware verdic
 - README limitations and validation exercises are understood.
 - The working tree is clean after the milestone commit.
 
-## Next milestone (not implemented)
+## Remaining V0.2 work
 
-V0.2 will normalize selected telemetry into security events and store them in
-SQLite. It should begin only after V0.1 behavior and concepts can be explained
-without relying on the code as a black box.
+Validate against real Windows Event Log/Sysmon configurations, refine startup
+and system-change coverage, and verify long-running behavior and storage limits.
+Detection, risk scores, and response remain later milestones.
