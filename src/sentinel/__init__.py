@@ -1,3 +1,3 @@
-"""Sentinel V0.1: local, read-only system telemetry."""
+"""Sentinel V0.2: local, read-only system telemetry."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

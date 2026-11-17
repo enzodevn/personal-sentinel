@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Generic, TypeVar
+from typing import Generic, Mapping, TypeVar
 
 
 T = TypeVar("T")
@@ -88,3 +88,19 @@ class NetworkConnection:
     status: str
     pid: int | None
     process_name: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class SecurityEvent:
+    """A normalized, locally stored telemetry event; not a threat verdict."""
+
+    event_id: str
+    source: str
+    event_type: str
+    timestamp: datetime
+    process_id: int | None
+    details: Mapping[str, str | int | float | bool | None]
+
+    def __post_init__(self) -> None:
+        if not self.timestamp.tzinfo or self.timestamp.utcoffset() is None:
+            raise ValueError("event timestamps must be timezone-aware")

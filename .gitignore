@@ -9,3 +9,5 @@ dist/
 *.egg-info/
 .env
 logs/*.log
+data/*.db
+data/*.db-*

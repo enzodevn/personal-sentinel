@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "personal-sentinel"
-version = "0.1.0"
-description = "A local, read-only Windows system observer for defensive security learning."
+version = "0.2.0"
+description = "A local, read-only Windows telemetry monitor for defensive security learning."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
