@@ -275,7 +275,15 @@ def show_events(database: Path, limit: int = 20) -> int:
             event.timestamp.isoformat(timespec="seconds"),
             event.event_type,
             _value(event.process_id),
-            _clip(str(event.details.get("name") or event.details.get("image") or ""), 32),
+            _clip(
+                str(
+                    event.details.get("name")
+                    or event.details.get("image")
+                    or event.details.get("process_name")
+                    or ""
+                ),
+                32,
+            ),
             _clip(_event_detail(event.details), 64),
             event.source,
         )
@@ -359,6 +367,26 @@ def _event_detail(details: Mapping[str, object]) -> str:
     registry_path = details.get("registry_path")
     if registry_path:
         return str(registry_path)
+    local_address = details.get("local_address")
+    if local_address:
+        local_port = details.get("local_port")
+        local = _endpoint(
+            str(local_address),
+            local_port if isinstance(local_port, int) else None,
+        )
+        remote_address = details.get("remote_address")
+        remote_port = details.get("remote_port")
+        remote = (
+            _endpoint(
+                str(remote_address),
+                remote_port if isinstance(remote_port, int) else None,
+            )
+            if remote_address
+            else "no remote peer"
+        )
+        protocol = str(details.get("protocol") or "")
+        status = str(details.get("status") or "")
+        return " ".join(part for part in (protocol, local, "->", remote, status) if part)
     destination_ip = details.get("destination_ip")
     if destination_ip:
         destination_port = details.get("destination_port")
