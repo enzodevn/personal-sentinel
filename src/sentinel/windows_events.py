@@ -16,7 +16,7 @@ from sentinel.storage import EventStore
 MAX_RECORDS_PER_READ = 100
 COMMAND_TIMEOUT_SECONDS = 10
 CHANNEL_EVENT_IDS = {
-    "System": {6005, 6006, 6008},
+    "System": {6005, 6006, 6008, 7040, 7045},
     "Security": {4688, 4689},
     "Microsoft-Windows-Sysmon/Operational": {1, 3, 12, 13, 14},
 }
@@ -231,6 +231,8 @@ class WindowsEventLogCollector:
                 6005: "windows.event_log_service_started",
                 6006: "windows.event_log_service_stopped",
                 6008: "windows.unexpected_shutdown",
+                7040: "system.service_start_type_changed",
+                7045: "system.service_installed",
             }
             event_type = event_types.get(event_id)
             if event_type is None:
@@ -242,6 +244,15 @@ class WindowsEventLogCollector:
             provider = cls._system_attribute(root, "Provider", "Name")
             if provider:
                 details["provider"] = provider
+            if event_id in {7040, 7045}:
+                event_data = cls._event_data(root)
+                service_name = event_data.get("ServiceName")
+                if event_id == 7040:
+                    service_name = service_name or event_data.get("param1")
+                if service_name:
+                    details["service_name"] = service_name
+                if event_id == 7045 and event_data.get("StartType"):
+                    details["start_type"] = event_data["StartType"]
             return SecurityEvent(
                 event_id=f"windows:{channel}:{record_id}",
                 source=channel,

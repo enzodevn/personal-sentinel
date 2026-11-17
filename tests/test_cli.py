@@ -148,6 +148,22 @@ def test_events_command_reads_local_history(monkeypatch, capsys, tmp_path) -> No
                     )
                 },
             ),
+            SecurityEvent(
+                event_id="network:opened",
+                source="network.snapshot",
+                event_type="network.endpoint_opened",
+                timestamp=datetime.now(UTC),
+                process_id=44,
+                details={
+                    "protocol": "TCP",
+                    "local_address": "192.0.2.10",
+                    "local_port": 50000,
+                    "remote_address": "198.51.100.10",
+                    "remote_port": 443,
+                    "status": "ESTABLISHED",
+                    "process_name": "browser.exe",
+                },
+            ),
         ]
     )
     monkeypatch.chdir(tmp_path)
@@ -160,3 +176,5 @@ def test_events_command_reads_local_history(monkeypatch, capsys, tmp_path) -> No
     assert "sample.exe" in output
     assert r"C:\Apps\sample.exe" in output
     assert r"CurrentVersion\Run\Sample" in output
+    assert "198.51.100.10:443" in output
+    assert "browser.exe" in output

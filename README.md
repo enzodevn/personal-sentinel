@@ -19,6 +19,7 @@ Windows host
     +-- ProcessCollector -----+--> typed results --> CLI
     +-- NetworkCollector -----+          |
                                          +--> ProcessDeltaMonitor
+                                         +--> NetworkDeltaMonitor
                                          +--> WindowsEventLogCollector
                                                   |
                                                   v
@@ -41,7 +42,8 @@ message broker, network API, or dashboard.
 | Structured logging | silent failures make results misleading | levels, JSON, rotation, privacy | records application health without command lines or secrets | SRE, DevSecOps, incident diagnosis | Yes | tests exercise log creation; manual inspection |
 | Event model and SQLite store | telemetry needs a local history | event schemas, SQL, retention | bounded local records with deduplication | data engineering, endpoint telemetry | Yes (V0.2) | round-trip, duplicate, retention tests |
 | Process delta monitoring | snapshots alone lose lifecycle changes | baselines, PID reuse, polling | records observed starts/exits without claiming malice | EDR and SOC engineering | Yes (V0.2) | synthetic process snapshots |
-| Windows Event Log | selected OS events need history | channels, event IDs, checkpoints | reads selected System, Security, and optional Sysmon process, network, startup-key, and service-key events | Windows security engineering | Yes (V0.2) | XML parsing and checkpoint tests |
+| Network delta monitoring | socket snapshots lose endpoint changes | endpoint identity, polling, partial results | records observed endpoint open/close transitions without inspecting packets | network and SOC engineering | Yes (V0.2) | synthetic socket snapshots |
+| Windows Event Log | selected OS events need history | channels, event IDs, checkpoints | reads selected System host/service lifecycle, Security process, and optional Sysmon process, network, and registry events | Windows security engineering | Yes (V0.2) | XML parsing and checkpoint tests |
 
 ## Prerequisites
 
@@ -80,10 +82,12 @@ sentinel events --limit 20
 ```
 
 `monitor` runs in the foreground until Ctrl+C. `--once` performs one collection
-cycle and exits; the first cycle establishes a process baseline and skips older
-Windows Event Log records. The default database is `data/sentinel.db`. Configure
-retention with `--retention-days`; the store also limits history to 100,000
-events. Use `--database` on both commands to choose another local path.
+cycle and exits; the first cycle establishes process and network baselines and
+skips older Windows Event Log records. The default database is `data/sentinel.db`.
+Configure retention with `--retention-days`; the store also limits history to
+100,000 events, so high event volume can make the actual history shorter than
+the configured age limit. Use `--database` on both commands to choose another
+local path.
 
 Application-health logs are written as JSON lines to `logs/sentinel.log` in the
 current directory. Set `SENTINEL_LOG_DIR` to choose a different local directory.
@@ -133,39 +137,60 @@ single unusual process or port is evidence to investigate—not a malware verdic
 - The event store excludes process command lines, event-log user fields, and
   Registry value contents. It is an ordinary, unencrypted SQLite database;
   protect the chosen folder accordingly.
+- The local event store includes observed socket endpoints (addresses, ports,
+  state, PID, and process name); it does not capture packets or DNS history.
 - Windows Event Log cursors start at the newest record on first use, so old records
   are not imported. Missing channels or permissions are reported as collection
   warnings; Sysmon is optional and is never installed or configured by Sentinel.
-- Only selected System events (6005, 6006, 6008), Security events (4688, 4689),
-  and Sysmon events (1, 3, 12, 13, 14) are ingested. Security process events
-  require the corresponding Windows audit policy and may require additional
-  permissions; Sentinel never changes audit settings. Events 6005/6006 describe
-  the Event Log service lifecycle, not definitive host startup/shutdown. Registry
-  events are restricted to selected startup and service keys, and value contents
-  are not stored. This is not full event-log archiving.
+- Only selected System events (6005, 6006, 6008, 7040, 7045), Security events
+  (4688, 4689), and Sysmon events (1, 3, 12, 13, 14) are ingested. System 7040
+  and 7045 report service start-type changes and installations. Service names
+  are retained; System 7045 also stores the start type, but not executable paths
+  or account names.
+  Security process events require the corresponding Windows audit policy and
+  may require additional permissions; Sentinel never changes audit settings.
+  Events 6005/6006 describe the Event Log service lifecycle, not definitive host
+  startup/shutdown. Registry events are restricted to selected startup and
+  service keys, and value contents are not stored. This is not full event-log
+  archiving.
 - `.env`, virtual environments, caches, and runtime logs are ignored by Git.
 - The tool should run with ordinary user privileges by default.
 
 ## Current limitations
 
 - System and manual network commands remain snapshots; continuous monitoring
-  currently records process lifecycle deltas and selected Windows events.
+  records process lifecycle and network endpoint deltas plus selected Windows
+  events.
 - Network results are socket metadata, not packet contents or DNS history.
+- TCP teardown states such as `CLOSE`, `FIN_WAIT`, and `TIME_WAIT` are not
+  reported as new endpoint openings; a previously observed endpoint is reported
+  closed when it enters teardown.
 - Process CPU is a brief sample and not a long-term utilization measure.
 - Processes can exit between enumeration and inspection.
-- Process lifecycle events require a readable process and creation time; the
-  first process scan is a baseline and does not generate start events.
+- Process lifecycle events require a readable process and creation time. The
+  first process and network scans establish baselines and do not generate
+  lifecycle events.
 - Windows Event Log polling is bounded to 100 records per channel per cycle.
 - V0.2 still has no detection rules, risk score, or security alerts.
 
 ## V0.2 status
 
 Implemented in this milestone: typed normalized events, local SQLite storage,
-retention and deduplication, process lifecycle polling, and bounded ingestion of
-selected System and optional Sysmon Event Log records, including selected
-Security process events and startup/service registry paths. This does not yet
-complete the full V0.2 roadmap; broader event normalization and validation across
-more Windows/Sysmon configurations remain.
+retention and deduplication, process and network lifecycle polling, and bounded
+ingestion of selected System, Security, and optional Sysmon events, including
+service and startup-related changes.
+
+On the validation host, `sentinel monitor --once` completed successfully and
+read the System channel. Security access was denied (`wevtutil` code 5), and the
+Sysmon channel was absent (code 15007); the monitor reported both as warnings
+and continued. Missing and inaccessible sources are covered by tests, but live
+Security and Sysmon event ingestion was not verified on this host. No audit
+policy was changed and Sysmon was not installed or configured. System service
+event normalization is covered by tests; whether those events occur depends on
+host activity.
+
+A network-only five-minute run at a five-second interval observed 1,520 endpoint
+events. This is a workload-specific sample, not a general expected rate.
 
 To try the foreground monitor on Windows:
 
@@ -179,9 +204,10 @@ In another terminal, inspect its local history:
 sentinel events --limit 20
 ```
 
-The first cycle is a baseline; start/exit events appear only after a later
-snapshot observes a change. If the optional Sysmon channel is missing or
-inaccessible, Sentinel reports a warning and continues with available sources.
+The first process and network scans establish baselines; lifecycle events appear
+only after a later snapshot observes a change. If an optional Windows event
+channel is missing or inaccessible, Sentinel reports a warning and continues
+with available sources.
 
 ## Definition of done for V0.1
 
@@ -191,8 +217,9 @@ inaccessible, Sentinel reports a warning and continues with available sources.
 - README limitations and validation exercises are understood.
 - The working tree is clean after the milestone commit.
 
-## Remaining V0.2 work
+## Further V0.2 validation
 
-Validate against real Windows Event Log/Sysmon configurations, refine startup
-and system-change coverage, and verify long-running behavior and storage limits.
-Detection, risk scores, and response remain later milestones.
+To validate Security and Sysmon event ingestion live, use a Windows environment
+where those channels and permissions are already available. Sentinel does not
+change audit policy or install/configure Sysmon. Detection, risk scores, and
+response remain later milestones.

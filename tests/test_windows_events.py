@@ -21,6 +21,51 @@ def event_xml(event_id: int, record_id: int, data: str = "") -> str:
     return EVENT_TEMPLATE.format(event_id=event_id, record_id=record_id, data=data)
 
 
+def test_system_service_events_keep_only_safe_service_metadata() -> None:
+    installed = WindowsEventLogCollector._normalize(
+        "System",
+        104,
+        7045,
+        ET.fromstring(
+            event_xml(
+                7045,
+                104,
+                '<Data Name="ServiceName">ExampleService</Data>'
+                '<Data Name="StartType">auto start</Data>'
+                '<Data Name="ImagePath">C:\\Private\\service.exe --secret</Data>'
+                '<Data Name="AccountName">DOMAIN\\private-user</Data>',
+            )
+        ),
+    )
+    start_type_changed = WindowsEventLogCollector._normalize(
+        "System",
+        105,
+        7040,
+        ET.fromstring(
+            event_xml(
+                7040,
+                105,
+                '<Data Name="param1">ExampleService</Data>'
+                '<Data Name="param2">auto start</Data>'
+                '<Data Name="param3">demand start</Data>',
+            )
+        ),
+    )
+
+    assert installed is not None
+    assert installed.event_type == "system.service_installed"
+    assert installed.details == {
+        "record_id": 104,
+        "event_id": 7045,
+        "provider": "Microsoft-Windows-Sysmon",
+        "service_name": "ExampleService",
+        "start_type": "auto start",
+    }
+    assert start_type_changed is not None
+    assert start_type_changed.event_type == "system.service_start_type_changed"
+    assert start_type_changed.details["service_name"] == "ExampleService"
+
+
 def test_sysmon_normalization_excludes_command_line_and_unapproved_fields() -> None:
     xml = event_xml(
         1,
@@ -153,7 +198,14 @@ def test_windows_log_collector_checkpoints_and_ingests_only_selected_events(
         "Microsoft-Windows-Sysmon/Operational": event_xml(1, 10),
     }
     new_records = {
-        "System": event_xml(6008, 6),
+        "System": event_xml(6008, 6)
+        + event_xml(
+            7045,
+            7,
+            '<Data Name="ServiceName">ExampleService</Data>'
+            '<Data Name="StartType">demand start</Data>'
+            '<Data Name="ImagePath">C:\\Private\\service.exe</Data>',
+        ),
         "Security": event_xml(
             4688,
             21,
@@ -177,6 +229,9 @@ def test_windows_log_collector_checkpoints_and_ingests_only_selected_events(
         if not is_latest:
             assert "EventRecordID >" in query
             assert "EventID=" in query
+            if channel == "System":
+                assert "EventID=7040" in query
+                assert "EventID=7045" in query
         return SimpleNamespace(
             returncode=0,
             stderr="",
@@ -194,10 +249,11 @@ def test_windows_log_collector_checkpoints_and_ingests_only_selected_events(
 
     assert [(item.event_type, item.process_id) for item in next_result.events] == [
         ("windows.unexpected_shutdown", None),
+        ("system.service_installed", None),
         ("process.created", 4321),
         ("process.created", 4321),
     ]
-    assert store.get_checkpoint("System") == 6
+    assert store.get_checkpoint("System") == 7
     assert store.get_checkpoint("Security") == 25
     assert store.get_checkpoint("Microsoft-Windows-Sysmon/Operational") == 11
 
