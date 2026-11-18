@@ -4,14 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "personal-sentinel"
-version = "0.2.0"
-description = "A local, read-only Windows telemetry monitor for defensive security learning."
+version = "0.3.0"
+description = "Local, read-only Windows telemetry and explainable detections for defensive security learning."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "Sentinel Project" }]
 dependencies = [
     "psutil>=6.0,<8.0",
+    "pysigma>=0.11,<1.0",
+    "PyYAML>=6.0,<7.0",
 ]
 
 [project.optional-dependencies]

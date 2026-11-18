@@ -100,7 +100,10 @@ class SecurityEvent:
     timestamp: datetime
     process_id: int | None
     details: Mapping[str, str | int | float | bool | None]
+    source_event_id: int | None = None
 
     def __post_init__(self) -> None:
         if not self.timestamp.tzinfo or self.timestamp.utcoffset() is None:
             raise ValueError("event timestamps must be timezone-aware")
+        if self.source_event_id is not None and self.source_event_id < 0:
+            raise ValueError("source_event_id must be non-negative")

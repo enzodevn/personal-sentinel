@@ -12,6 +12,7 @@ from sentinel.models import (
     SecurityEvent,
     SystemSnapshot,
 )
+from sentinel.detection.engine import DetectionEngine
 from sentinel.storage import EventStore
 
 
@@ -103,11 +104,17 @@ def test_processes_command_accepts_limit(monkeypatch, capsys, tmp_path) -> None:
 
 def test_monitor_command_can_run_one_cycle(monkeypatch, capsys, tmp_path) -> None:
     class FakeMonitor:
-        def __init__(self, store) -> None:
+        def __init__(self, store, **kwargs) -> None:
             pass
 
         def collect_once(self):
-            return SimpleNamespace(stored_events=2, pruned_events=0, errors=())
+            return SimpleNamespace(
+                stored_events=2,
+                stored_detections=1,
+                pruned_events=0,
+                pruned_detections=0,
+                errors=(),
+            )
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "SentinelMonitor", FakeMonitor)
@@ -119,6 +126,60 @@ def test_monitor_command_can_run_one_cycle(monkeypatch, capsys, tmp_path) -> Non
 
     assert exit_code == 0
     assert "2 new event(s)" in output
+    assert "1 new alert(s)" in output
+
+
+def test_monitor_command_loads_local_sigma_rules(monkeypatch, capsys, tmp_path) -> None:
+    class FakeMonitor:
+        def __init__(self, store, **kwargs) -> None:
+            pass
+
+        def collect_once(self):
+            return SimpleNamespace(
+                stored_events=0,
+                stored_detections=0,
+                pruned_events=0,
+                pruned_detections=0,
+                errors=(),
+            )
+
+    rule_file = tmp_path / "rule.yml"
+    rule_file.write_text(
+        r"""
+title: Local process rule
+id: 11111111-2222-4333-8444-555555555555
+status: test
+description: A local test detection.
+logsource:
+  product: windows
+  category: process_creation
+detection:
+  selection:
+    EventID: 1
+    Image|endswith: '\cmd.exe'
+  condition: selection
+level: high
+date: 2026-11-18
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cli, "SentinelMonitor", FakeMonitor)
+
+    exit_code = cli.main(
+        [
+            "monitor",
+            "--database",
+            str(tmp_path / "events.db"),
+            "--sigma-rules",
+            str(rule_file),
+            "--once",
+        ]
+    )
+    output = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "Loaded 1 Sigma rule(s)" in output
+    assert "Microsoft-Windows-Sysmon/Operational" in output
 
 
 def test_events_command_reads_local_history(monkeypatch, capsys, tmp_path) -> None:
@@ -178,3 +239,28 @@ def test_events_command_reads_local_history(monkeypatch, capsys, tmp_path) -> No
     assert r"CurrentVersion\Run\Sample" in output
     assert "198.51.100.10:443" in output
     assert "browser.exe" in output
+
+
+def test_alerts_command_explains_stored_findings(monkeypatch, capsys, tmp_path) -> None:
+    database = tmp_path / "events.db"
+    record = SecurityEvent(
+        event_id="sys:7045:1",
+        source="System",
+        event_type="system.service_installed",
+        timestamp=datetime(2026, 11, 17, 12, 0, tzinfo=UTC),
+        process_id=None,
+        source_event_id=7045,
+        details={"service_name": "ExampleService", "start_type": "auto"},
+    )
+    detection = DetectionEngine().evaluate([record])[0]
+    EventStore(database).persist_cycle([record], [detection])
+    monkeypatch.chdir(tmp_path)
+
+    exit_code = cli.main(["alerts", "--database", str(database)])
+    output = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert detection.name in output
+    assert "Why:" in output
+    assert "EventID=7045" in output
+    assert "ExampleService" in output

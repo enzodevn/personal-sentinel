@@ -1,15 +1,16 @@
-"""Human-readable command-line interface for Sentinel V0.1.
+"""Human-readable command-line interface for Sentinel V0.3.
 
-PURPOSE: Make local telemetry inspectable without a server or dashboard.
+PURPOSE: Inspect local telemetry and explainable findings without a server.
 WHAT IT TEACHES: CLI design, composition, output contracts, and exit codes.
 CAREER VALUE: Operational and security tooling often begins with a reliable CLI.
-SYSTEM VALUE: Connects collectors to the user while keeping UI logic separate.
-CURRENT NECESSITY: HIGH; it is the V0.1 interaction surface.
+SYSTEM VALUE: Connects collectors and detection to users while keeping UI separate.
+CURRENT NECESSITY: HIGH; it is the local interaction surface.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import math
 import sqlite3
@@ -23,6 +24,9 @@ from sentinel import __version__
 from sentinel.collectors.network import NetworkCollector
 from sentinel.collectors.processes import ProcessCollector
 from sentinel.collectors.system import SystemCollector
+from sentinel.detection.engine import DEFAULT_RULES, DetectionEngine
+from sentinel.detection.models import Detection
+from sentinel.detection.sigma import SigmaRuleLoader
 from sentinel.logging_config import configure_logging
 from sentinel.models import CollectionError, NetworkConnection, ProcessInfo
 from sentinel.monitoring import SentinelMonitor
@@ -87,6 +91,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="run one collection cycle and exit",
     )
+    monitor.add_argument(
+        "--sigma-rules",
+        type=Path,
+        help="load supported local Sigma YAML rules from a file or directory",
+    )
     events = subparsers.add_parser("events", help="show recent locally stored events")
     events.add_argument(
         "--database",
@@ -99,6 +108,22 @@ def build_parser() -> argparse.ArgumentParser:
         type=positive_integer,
         default=20,
         help="maximum number of events to show (default: 20)",
+    )
+    alerts = subparsers.add_parser(
+        "alerts",
+        help="show recent locally stored detection findings",
+    )
+    alerts.add_argument(
+        "--database",
+        type=Path,
+        default=Path("data") / "sentinel.db",
+        help="local SQLite database path (default: data/sentinel.db)",
+    )
+    alerts.add_argument(
+        "--limit",
+        type=positive_integer,
+        default=20,
+        help="maximum number of alerts to show (default: 20)",
     )
     return parser
 
@@ -133,8 +158,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             interval=args.interval,
             retention_days=args.retention_days,
             once=args.once,
+            sigma_rules=args.sigma_rules,
         ),
         "events": lambda: show_events(args.database, args.limit),
+        "alerts": lambda: show_alerts(args.database, args.limit),
     }
     return handlers[args.command]()
 
@@ -231,17 +258,38 @@ def show_monitor(
     interval: float = 5.0,
     retention_days: int = 30,
     once: bool = False,
+    sigma_rules: Path | None = None,
 ) -> int:
     try:
+        rules = list(DEFAULT_RULES)
+        if sigma_rules is not None:
+            loaded_rules = SigmaRuleLoader().load(sigma_rules)
+            rules.extend(loaded_rules)
+            required_sources = sorted(
+                {
+                    source
+                    for rule in loaded_rules
+                    for source in rule.definition.sources
+                }
+            )
+            print(
+                f"Loaded {len(loaded_rules)} Sigma rule(s); required channels: "
+                f"{', '.join(required_sources)}."
+            )
         store = EventStore(database, retention_days=retention_days)
-        monitor = SentinelMonitor(store)
+        monitor = SentinelMonitor(
+            store,
+            detection_engine=DetectionEngine(rules),
+        )
         print(f"Monitoring local telemetry into {database} (Ctrl+C to stop).")
         reported_sources: set[str] = set()
         while True:
             cycle = monitor.collect_once()
             print(
                 f"Cycle: {cycle.stored_events} new event(s), "
-                f"{cycle.pruned_events} expired event(s) removed."
+                f"{cycle.stored_detections} new alert(s), "
+                f"{cycle.pruned_events} expired event(s) and "
+                f"{cycle.pruned_detections} expired alert(s) removed."
             )
             new_errors = [
                 error for error in cycle.errors if error.scope not in reported_sources
@@ -253,7 +301,7 @@ def show_monitor(
             time.sleep(interval)
     except KeyboardInterrupt:
         print("\nMonitoring stopped.")
-    except (OSError, sqlite3.Error, RuntimeError) as error:
+    except (OSError, sqlite3.Error, RuntimeError, ValueError) as error:
         LOGGER.exception("monitoring failed")
         print(f"Monitoring failed: {type(error).__name__}: {error}", file=sys.stderr)
         return 1
@@ -263,7 +311,7 @@ def show_monitor(
 def show_events(database: Path, limit: int = 20) -> int:
     try:
         events = EventStore(database).recent_events(limit)
-    except (OSError, sqlite3.Error, RuntimeError) as error:
+    except (OSError, sqlite3.Error, RuntimeError, ValueError) as error:
         LOGGER.exception("event history could not be read")
         print(f"Could not read event history: {type(error).__name__}: {error}", file=sys.stderr)
         return 1
@@ -294,6 +342,54 @@ def show_events(database: Path, limit: int = 20) -> int:
         rows,
     )
     return 0
+
+
+def show_alerts(database: Path, limit: int = 20) -> int:
+    try:
+        detections = EventStore(database).recent_detections(limit)
+    except (OSError, sqlite3.Error, RuntimeError, ValueError) as error:
+        LOGGER.exception("alert history could not be read")
+        print(f"Could not read alert history: {type(error).__name__}: {error}", file=sys.stderr)
+        return 1
+    print("SENTINEL ALERTS (prioritization findings, not malware verdicts)")
+    print(f"Displayed: {len(detections)}")
+    if not detections:
+        print("No alerts are stored.")
+        return 0
+    for detection in detections:
+        _print_detection(detection)
+    return 0
+
+
+def _print_detection(detection: Detection) -> None:
+    print()
+    print(
+        f"[{detection.risk_level.value.upper()} {detection.risk_score}/100] "
+        f"{detection.name}"
+    )
+    print(f"Rule: {detection.rule_id} v{detection.rule_version}")
+    print(f"Severity: {detection.severity.value} | Confidence: {detection.confidence}/100")
+    print(f"Why: {detection.criteria}")
+    for evidence in detection.evidence:
+        event_id = (
+            f" EventID={evidence.source_event_id}"
+            if evidence.source_event_id is not None
+            else ""
+        )
+        print(
+            f"Evidence: {evidence.event_type} | {evidence.source}{event_id} | "
+            f"PID={_value(evidence.process_id)} | "
+            f"{evidence.observed_at.isoformat(timespec='seconds')}"
+        )
+        if evidence.details:
+            detail = json.dumps(
+                dict(evidence.details),
+                ensure_ascii=True,
+                sort_keys=True,
+            )
+            print(f"  Details: {_clip(detail, 180)}")
+    for recommendation in detection.recommendations:
+        print(f"Review: {recommendation}")
 
 
 def _report_errors(errors: Sequence[CollectionError]) -> None:

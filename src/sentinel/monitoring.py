@@ -5,10 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sentinel.collectors.network import NetworkCollector
 from sentinel.collectors.processes import ProcessCollector
+from sentinel.detection.correlation import CorrelationEngine
+from sentinel.detection.engine import DetectionEngine
 from sentinel.models import (
     CollectionError,
     CollectionResult,
@@ -256,7 +258,9 @@ class NetworkDeltaMonitor:
 class MonitorCycle:
     observed_events: int
     stored_events: int
+    stored_detections: int
     pruned_events: int
+    pruned_detections: int
     errors: tuple[CollectionError, ...]
 
 
@@ -270,11 +274,15 @@ class SentinelMonitor:
         process_monitor: ProcessDeltaMonitor | None = None,
         network_monitor: NetworkDeltaMonitor | None = None,
         event_log_collector: WindowsEventLogCollector | None = None,
+        detection_engine: DetectionEngine | None = None,
+        correlation_engine: CorrelationEngine | None = None,
     ) -> None:
         self.store = store
         self.process_monitor = process_monitor or ProcessDeltaMonitor()
         self.network_monitor = network_monitor or NetworkDeltaMonitor()
         self.event_log_collector = event_log_collector or WindowsEventLogCollector()
+        self.detection_engine = detection_engine or DetectionEngine()
+        self.correlation_engine = correlation_engine or CorrelationEngine()
 
     def collect_once(self) -> MonitorCycle:
         process_result = self.process_monitor.collect()
@@ -285,17 +293,53 @@ class SentinelMonitor:
             + network_result.data
             + list(event_log_result.events)
         )
-        stored = self.store.persist_batch(events, event_log_result.checkpoints)
+        detections = self.detection_engine.evaluate(events)
+        correlation_events: list[SecurityEvent] = []
+        correlation_errors: tuple[CollectionError, ...] = ()
+        window_seconds = self.correlation_engine.max_window_seconds
+        if window_seconds:
+            correlation_events = self.store.events_since(
+                datetime.now(UTC) - timedelta(seconds=window_seconds),
+                limit=5_000,
+            )
+            if len(correlation_events) == 5_000:
+                correlation_errors = (
+                    CollectionError(
+                        scope="detection.correlation",
+                        error_type="WindowLimitReached",
+                        message=(
+                            "At least 5,000 events are in the correlation window; "
+                            "some relationships may be omitted."
+                        ),
+                    ),
+                )
+            indexed_events = {event.event_id: event for event in correlation_events}
+            indexed_events.update((event.event_id, event) for event in events)
+            detections.extend(
+                self.correlation_engine.evaluate(indexed_events.values())
+            )
+        unique_detections = {
+            detection.detection_id: detection for detection in detections
+        }
+        stored, stored_detections = self.store.persist_cycle(
+            events,
+            list(unique_detections.values()),
+            event_log_result.checkpoints,
+        )
         self.process_monitor.commit()
         self.network_monitor.commit()
         pruned = self.store.prune()
+        pruned_detections = self.store.prune_detections()
         return MonitorCycle(
             observed_events=len(events),
             stored_events=stored,
+            stored_detections=stored_detections,
             pruned_events=pruned,
+            pruned_detections=pruned_detections,
             errors=(
                 process_result.errors
                 + network_result.errors
                 + event_log_result.errors
+                + correlation_errors
             ),
         )

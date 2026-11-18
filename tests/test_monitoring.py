@@ -12,6 +12,7 @@ from sentinel.monitoring import (
     ProcessDeltaMonitor,
     SentinelMonitor,
 )
+from sentinel.storage import EventStore
 from sentinel.windows_events import WindowsEventBatch
 
 
@@ -282,12 +283,18 @@ def test_sentinel_monitor_persists_network_events_before_committing_state() -> N
             self.events = []
             self.actions = actions
 
-        def persist_batch(self, events, checkpoints):
+        def persist_cycle(self, events, detections, checkpoints):
             self.actions.append("persist")
             self.events.extend(events)
-            return len(events)
+            return len(events), len(detections)
+
+        def events_since(self, since, *, limit):
+            return []
 
         def prune(self):
+            return 0
+
+        def prune_detections(self):
             return 0
 
     class FakeEventLogCollector:
@@ -308,5 +315,48 @@ def test_sentinel_monitor_persists_network_events_before_committing_state() -> N
     cycle = monitor.collect_once()
 
     assert cycle.stored_events == 1
+    assert cycle.stored_detections == 0
     assert store.events == [event]
     assert actions == ["persist", "commit", "commit"]
+
+
+def test_sentinel_monitor_evaluates_and_persists_detection_with_events(tmp_path) -> None:
+    observed = SecurityEvent(
+        event_id="System:7045:100",
+        source="System",
+        event_type="system.service_installed",
+        timestamp=datetime.now(UTC),
+        process_id=None,
+        source_event_id=7045,
+        details={"service_name": "ExampleService", "start_type": "auto"},
+    )
+
+    class FakeDeltaMonitor:
+        def collect(self):
+            return CollectionResult(data=[])
+
+        def commit(self):
+            pass
+
+    class FakeEventLogCollector:
+        def collect(self, store):
+            return WindowsEventBatch(
+                events=(observed,),
+                checkpoints={"System": 100},
+                errors=(),
+            )
+
+    store = EventStore(tmp_path / "events.db")
+    monitor = SentinelMonitor(
+        store,
+        process_monitor=FakeDeltaMonitor(),
+        network_monitor=FakeDeltaMonitor(),
+        event_log_collector=FakeEventLogCollector(),
+    )
+
+    cycle = monitor.collect_once()
+
+    assert cycle.stored_events == 1
+    assert cycle.stored_detections == 1
+    assert store.recent_detections()[0].evidence[0].event_id == observed.event_id
+    assert store.get_checkpoint("System") == 100

@@ -260,6 +260,7 @@ class WindowsEventLogCollector:
                 timestamp=timestamp,
                 process_id=None,
                 details=details,
+                source_event_id=event_id,
             )
 
         raw_fields = {
@@ -299,6 +300,7 @@ class WindowsEventLogCollector:
                 timestamp=timestamp,
                 process_id=process_id,
                 details=details,
+                source_event_id=event_id,
             )
 
         if event_id in {12, 13, 14}:
@@ -345,6 +347,7 @@ class WindowsEventLogCollector:
             timestamp=timestamp,
             process_id=process_id,
             details=normalized,
+            source_event_id=event_id,
         )
 
     @classmethod
@@ -390,6 +393,7 @@ class WindowsEventLogCollector:
             timestamp=timestamp,
             process_id=process_id,
             details=details,
+            source_event_id=event_id,
         )
 
     @classmethod

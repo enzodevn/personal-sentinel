@@ -1,10 +1,10 @@
 # Personal Sentinel
 
-Personal Sentinel V0.2 builds on the read-only V0.1 collectors with opt-in,
-continuous process and Windows Event Log monitoring. Selected events are
-normalized and stored in a local SQLite database. It does **not** label activity
-as malicious, block connections, terminate processes, or send data outside the
-computer.
+Personal Sentinel V0.3 builds on the read-only V0.1 collectors and V0.2
+monitoring pipeline with local, explainable detection and risk prioritization.
+Selected events and findings are stored in a local SQLite database. It does
+**not** label activity as malicious, block connections, terminate processes, or
+send data outside the computer.
 
 ## Why V0.2 exists
 
@@ -44,6 +44,10 @@ message broker, network API, or dashboard.
 | Process delta monitoring | snapshots alone lose lifecycle changes | baselines, PID reuse, polling | records observed starts/exits without claiming malice | EDR and SOC engineering | Yes (V0.2) | synthetic process snapshots |
 | Network delta monitoring | socket snapshots lose endpoint changes | endpoint identity, polling, partial results | records observed endpoint open/close transitions without inspecting packets | network and SOC engineering | Yes (V0.2) | synthetic socket snapshots |
 | Windows Event Log | selected OS events need history | channels, event IDs, checkpoints | reads selected System host/service lifecycle, Security process, and optional Sysmon process, network, and registry events | Windows security engineering | Yes (V0.2) | XML parsing and checkpoint tests |
+| Explainable detection and risk | raw events need consistent review priorities | rule contracts, evidence quality, weighted scoring | describes observed activity without asserting malware or probability | detection and SOC engineering | Yes (V0.3) | deterministic rules and risk tests |
+| Local Sigma rules | custom detections need a familiar format | YAML validation, mapping, safe condition evaluation | supports a bounded subset over fields Sentinel already collects | detection engineering | Yes (V0.3) | parser rejection and synthetic match tests |
+| Temporal correlation | related events need bounded context | event windows, stable identities, correlation | relates selected Sysmon process and autostart events for the same PID | detection engineering | Yes (V0.3) | time-window, PID, and evidence tests |
+| Stored alerts and CLI | findings need reviewable history | SQLite migrations, idempotency, explainability | atomically stores and displays bounded findings with evidence | SOC tooling and data engineering | Yes (V0.3) | migration, retention, pipeline, and CLI tests |
 
 ## Prerequisites
 
@@ -78,7 +82,9 @@ sentinel network
 sentinel network --limit 30
 sentinel monitor --once
 sentinel monitor --interval 5
+sentinel monitor --sigma-rules .\rules
 sentinel events --limit 20
+sentinel alerts --limit 20
 ```
 
 `monitor` runs in the foreground until Ctrl+C. `--once` performs one collection
@@ -86,8 +92,10 @@ cycle and exits; the first cycle establishes process and network baselines and
 skips older Windows Event Log records. The default database is `data/sentinel.db`.
 Configure retention with `--retention-days`; the store also limits history to
 100,000 events, so high event volume can make the actual history shorter than
-the configured age limit. Use `--database` on both commands to choose another
-local path.
+the configured age limit. Alerts use the same age retention and are capped at
+20,000 records. Use `--database` on the monitor, events, and alerts commands to
+choose another local path. `--sigma-rules` accepts a local YAML file or folder;
+Sentinel does not download rules.
 
 Application-health logs are written as JSON lines to `logs/sentinel.log` in the
 current directory. Set `SENTINEL_LOG_DIR` to choose a different local directory.
@@ -137,6 +145,9 @@ single unusual process or port is evidence to investigate—not a malware verdic
 - The event store excludes process command lines, event-log user fields, and
   Registry value contents. It is an ordinary, unencrypted SQLite database;
   protect the chosen folder accordingly.
+- Detection records retain rule metadata and only fields selected as evidence.
+  Alert scores prioritize review; they are not probabilities or malware
+  verdicts. Sentinel takes no automatic response action.
 - The local event store includes observed socket endpoints (addresses, ports,
   state, PID, and process name); it does not capture packets or DNS history.
 - Windows Event Log cursors start at the newest record on first use, so old records
@@ -171,7 +182,8 @@ single unusual process or port is evidence to investigate—not a malware verdic
   first process and network scans establish baselines and do not generate
   lifecycle events.
 - Windows Event Log polling is bounded to 100 records per channel per cycle.
-- V0.2 still has no detection rules, risk score, or security alerts.
+- V0.3 adds a local detection engine, risk prioritization, event correlation,
+  optional Sigma rules, and stored explainable alerts.
 
 ## V0.2 status
 
@@ -221,5 +233,45 @@ with available sources.
 
 To validate Security and Sysmon event ingestion live, use a Windows environment
 where those channels and permissions are already available. Sentinel does not
-change audit policy or install/configure Sysmon. Detection, risk scores, and
-response remain later milestones.
+change audit policy or install/configure Sysmon. V0.3 detections use only
+telemetry that the host allows Sentinel to collect.
+
+## V0.3 status (complete)
+
+The deterministic rule engine evaluates selected autostart-registry and
+Windows service changes already collected by V0.2. It also supports local
+Sigma YAML rules and correlates a Sysmon process-creation event with a
+monitored autostart registry change when both have the same PID and occur within
+five minutes. Correlation uses a bounded recent event window. Findings retain
+the rule ID and version, match criteria, selected event evidence, source event
+IDs where available, optional MITRE ATT&CK technique, and defensive review
+guidance. These changes can be legitimate; a finding is not a malware verdict.
+
+The risk score is a 0–100 prioritization score, not a probability of infection:
+
+```text
+30% severity + 25% confidence + 20% impact
++ 15% evidence quality + 10% context
+```
+
+Severity is mapped to 0, 25, 50, 75, or 100 for informational, low, moderate,
+high, or critical. Evidence quality is the percentage of rule-declared fields
+present in the matched event. Default score bands are informational (0–19),
+low (20–39), moderate (40–59), high (60–79), and critical (80–100); the weights
+and band limits are configurable in code. Each rule declares its severity,
+confidence, impact, and context inputs. Confidence describes the strength of
+the rule signal, not the likelihood of infection.
+
+Monitor cycles persist telemetry, detections, and Windows Event Log checkpoints
+atomically. Stable detection IDs make repeated findings idempotent; schema
+migrations preserve existing event history. `sentinel alerts` displays stored
+findings, criteria, evidence, and review recommendations. Supported Sigma rules
+are validated locally with pySigma and are limited to Sentinel's mapped Windows
+event sources, collected fields, and supported condition/modifier subset.
+Sigma correlation rules, unsupported fields, and fields that Sentinel omits
+for privacy (such as command lines) are rejected explicitly.
+
+Security and Sysmon live ingestion remain subject to the permissions and
+channel availability described above. If a required channel is missing or
+inaccessible, the monitor reports the collection warning and continues with
+available sources. No response actions are taken.

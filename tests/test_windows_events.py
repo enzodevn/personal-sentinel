@@ -54,6 +54,7 @@ def test_system_service_events_keep_only_safe_service_metadata() -> None:
 
     assert installed is not None
     assert installed.event_type == "system.service_installed"
+    assert installed.source_event_id == 7045
     assert installed.details == {
         "record_id": 104,
         "event_id": 7045,
@@ -88,6 +89,7 @@ def test_sysmon_normalization_excludes_command_line_and_unapproved_fields() -> N
     assert result is not None
     assert result.event_type == "process.created"
     assert result.process_id == 4321
+    assert result.source_event_id == 1
     assert result.details == {
         "record_id": 101,
         "image": "C:\\Apps\\sample.exe",
@@ -118,6 +120,7 @@ def test_sysmon_registry_events_keep_only_selected_autostart_metadata() -> None:
     assert result is not None
     assert result.event_type == "system.autostart_registry_changed"
     assert result.process_id == 4321
+    assert result.source_event_id == 13
     assert result.details == {
         "record_id": 102,
         "registry_path": r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Sample",
